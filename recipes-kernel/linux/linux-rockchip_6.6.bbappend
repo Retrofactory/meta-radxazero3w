@@ -17,6 +17,7 @@ SRC_URI:append:radxa-zero3w = " \
     file://wifi-bt.cfg \
     file://led-triggers.cfg \
     file://psplash-fb.cfg \
+    file://sound.cfg \
     file://camera-mipi-csi.cfg \
     file://gpu-panfrost.cfg \
     file://lttng-kprobes.cfg \
