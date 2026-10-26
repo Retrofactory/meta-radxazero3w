@@ -26,7 +26,7 @@ part --source rawcopy --sourceparams="file=idbloader.img" --offset 32 --fixed-si
 part --source rawcopy --sourceparams="file=u-boot.itb" --offset 8192 --fixed-size 2M --no-table
 
 # BOOT Partition - starts at sector 20544 (10MB offset) - can be optimized
-part --source bootimg-partition --ondisk mmcblk --fstype=ext2 --label boot --active --offset 10272 --fixed-size 64M
+part --source bootimg-partition --ondisk mmcblk --fstype=ext2 --label boot --active --offset 10272 --fixed-size 128M
 
 # rootfs Partition - minimize gap after BOOT partition
 part --source rootfs --ondisk mmcblk --fstype=ext4 --label rootfs --align 1024
