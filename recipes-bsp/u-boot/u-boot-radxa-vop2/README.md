@@ -5,14 +5,13 @@ select **one** BitBake `-R` profile from this directory:
 
 | Profile | Behavior |
 |---|---|
-| `artwork-cleanup.conf` | Draw `/arcadia-splash.bmp` from the SPL-selected MMC's `boot` partition (1280x720, 24-bit; a missing or invalid image is skipped). Normal video removal runs before Linux, so the display goes dark until Linux lights it. |
-| `guarded-handoff.WIP.conf` | The same artwork plus an opt-in handoff: with `arcadia_handoff=yes` set, U-Boot keeps the VOP and HDMI running, reserves its framebuffer and publishes it to Linux through the FDT (the vendor kernel's loader-logo path then takes over without a black frame). Guards stop the extlinux read, `booti` and `bootm` from overwriting the framebuffer. Any guard failure falls back to normal video removal. |
-| `guarded-handoff-auto.WIP.conf` | The guarded profile with `arcadia_handoff=yes` set in the default boot command, for firmware that is booted unattended (the environment is not persistent on this board). |
+| `guarded-handoff.conf` | Draws `/arcadia-splash.bmp` from the SPL-selected MMC's `boot` partition (1280x720, 24-bit; a missing or invalid image is skipped), then, with `arcadia_handoff=yes` set, keeps the VOP and HDMI running, reserves the framebuffer and publishes it to Linux through the FDT (the vendor kernel's loader-logo path then takes over without a black frame). Guards stop the extlinux read, `booti` and `bootm` from overwriting the framebuffer. Any guard failure falls back to normal video removal. |
+| `guarded-handoff-auto.conf` | The same with `arcadia_handoff=yes` set in the default boot command, for firmware that is booted unattended (the environment is not persistent on this board). |
 
 The handoff accepts only the tested RK3566 HDMI VP0 1080p60 mode; boot with
-`video=HDMI-A-1:1920x1080@60` (already the extlinux default). The profiles are WIP: they do
-not implement failure containment after the display has been preserved (see
-`docs/radxa-reserved-framebuffer-handoff-plan.md` in the orchestrator).
+`video=HDMI-A-1:1920x1080@60` (already the extlinux default). Limitations (single board, single output,
+no fault-injection of a failed takeover) are listed in
+`docs/radxa-reserved-framebuffer-handoff-plan.md` in the orchestrator.
 
 `recipes-core/images/profiles/boot-artwork-staging.conf` adds `arcadia-splash.bmp`
 (built by the `arcadia-boot-splash` recipe) to the Radxa development image; select it
@@ -22,7 +21,7 @@ separately when staging an image.
 
 ```sh
 bitbake -R <profile> -c compile u-boot-radxa
-python3 tests/check_firmware_profile.py {cleanup|guarded} <u-boot.bin> <.config>   # marker check of the build
+python3 tests/check_firmware_profile.py <u-boot.bin> <.config>             # marker check of the build
 python3 tests/guard_helpers_test.py                                                 # host tests of the guards
 ```
 
@@ -46,7 +45,7 @@ A chainloaded child runs the real boot path, so a power cycle returns to the ins
 
 ## Stack and provenance
 
-Stock U-Boot 2026.01 has no RK3568 VOP2 driver, so `vop2-base.inc` first applies the eight patches
+Stock U-Boot 2026.01 has no RK3568 VOP2 driver, so `guarded-handoff.conf` first applies the eight patches
 of the [submitted VOP2/HDMI
 series](https://lore.kernel.org/u-boot/cover.1784424101.git.daniel@makrotopia.org/). These are
 `01-08-upstream.patch`: unmerged mailing-list changes by other authors (each header carries its

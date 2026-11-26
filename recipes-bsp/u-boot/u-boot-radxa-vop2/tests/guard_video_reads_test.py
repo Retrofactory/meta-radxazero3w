@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Compile and exercise the extlinux video-read guard from the WIP patch.
+"""Compile and exercise the extlinux video-read guard from the patch.
 
 Two layers run here:
 
 1. Helper tests compile the exact added bodies of
    arcadia_video_read_check() and arcadia_video_read_guarded() (extracted
-   from 14-guard-extlinux-reads.WIP.patch) against fake gd/udevice objects.
+   from 14-guard-extlinux-reads.patch) against fake gd/udevice objects.
 2. Call-site test copies the real boot/bootmeth-uclass.c, applies the patch to
    that copy, extracts the patched bootmeth_common_read_file() and compiles it
    with stubs. It asserts fs_read() is never reached when the extlinux guard
@@ -25,7 +25,7 @@ import subprocess
 import tempfile
 
 RECIPE = Path(__file__).resolve().parents[1]
-PATCH = RECIPE / "14-guard-extlinux-reads.WIP.patch"
+PATCH = RECIPE / "14-guard-extlinux-reads.patch"
 SOURCE = Path(os.environ.get("ARCADIA_UBOOT_SOURCE", "/tmp/arcadia-uboot-vop2/source"))
 
 
@@ -465,7 +465,10 @@ def main():
         "arcadia_video_read_check", "arcadia_video_read_guarded"))
     with tempfile.TemporaryDirectory(prefix="arcadia-reads-test-") as tmp:
         compile_and_run(tmp, "helper_test", PRELUDE + helpers + HELPER_TESTS)
-        if not (SOURCE / "boot" / "bootmeth-uclass.c").is_file():
+        if not all((SOURCE / "boot" / name).is_file()
+                   for name in ("bootmeth-uclass.c", "bootmeth_extlinux.c")):
+            if "ARCADIA_UBOOT_SOURCE" in os.environ:
+                raise SystemExit(f"call-site tests: incomplete U-Boot source at {SOURCE}")
             print(f"call-site tests skipped: no U-Boot source at {SOURCE}")
             return
         function = patched_read_file()

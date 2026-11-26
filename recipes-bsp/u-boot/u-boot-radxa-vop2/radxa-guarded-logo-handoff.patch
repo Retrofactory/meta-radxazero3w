@@ -1,5 +1,5 @@
 Subject: [PATCH] radxa: preserve scanout only for a guarded loader-logo handoff
-Upstream-Status: Inappropriate [board-specific diagnostic]
+Upstream-Status: Inappropriate [board-specific]
 
 Requires the boot-medium artwork patch. Keep the normal removal path unless
 the artwork succeeded and the mode, reservation, boot path and FDT pass
@@ -47,7 +47,7 @@ the handoff checks. This does not validate the Linux takeover.
  	return 0;
  }
  
-+/* Experimental board hook: reset per-boot state before any new attempt. */
++/* Board hook: reset per-boot state before any new attempt. */
 +__weak void board_bootm_start(void)
 +{
 +}
@@ -120,7 +120,7 @@ the handoff checks. This does not validate the Linux takeover.
  	return 0;
 +}
 +
-+/* Local diagnostic: preserve scanout only after a complete, validated FDT handoff. */
++/* Guarded handoff: preserve scanout only after a complete, validated FDT handoff. */
 +extern bool arcadia_artwork_shown;
 +static bool arcadia_handoff_ready;
 +

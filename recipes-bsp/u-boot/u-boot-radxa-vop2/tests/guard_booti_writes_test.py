@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Compile and exercise the booti framebuffer pre-write guards from the WIP patch.
+"""Compile and exercise the booti framebuffer pre-write guards from the patch.
 
 Three layers run here:
 
-1. Patch-scope checks: 15-booti-write-guards.WIP.patch must touch only
+1. Patch-scope checks: 15-booti-write-guards.patch must touch only
    cmd/booti.c, must add no #include, and must contain no removed line, so
    every existing input/load/source check in the file is unchanged.
 2. Helper tests compile the exact added body of arcadia_video_write_check()
@@ -32,7 +32,7 @@ import subprocess
 import tempfile
 
 RECIPE = Path(__file__).resolve().parents[1]
-PATCH = RECIPE / "15-booti-write-guards.WIP.patch"
+PATCH = RECIPE / "15-booti-write-guards.patch"
 SOURCE = Path(os.environ.get("ARCADIA_UBOOT_SOURCE", "/tmp/arcadia-uboot-vop2/source"))
 
 
@@ -764,6 +764,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="arcadia-booti-test-") as tmp:
         compile_and_run(tmp, "helper_test", HELPER_PRELUDE + helper + HELPER_TESTS)
         if not (SOURCE / "cmd" / "booti.c").is_file():
+            if "ARCADIA_UBOOT_SOURCE" in os.environ:
+                raise SystemExit(f"call-site tests: incomplete U-Boot source at {SOURCE}")
             print(f"call-site tests skipped: no U-Boot source at {SOURCE}")
             return
         patched = patched_booti()

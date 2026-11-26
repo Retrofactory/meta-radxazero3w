@@ -1,5 +1,5 @@
 Subject: [PATCH] booti: refuse framebuffer writes before decompression and relocation
-Upstream-Status: Inappropriate [local diagnostic]
+Upstream-Status: Inappropriate [board-specific]
 
 booti writes to three addresses taken from environment or Image metadata
 before any of them is compared with the framebuffer reservation:
@@ -11,7 +11,7 @@ arithmetic. The scaled compression bound is also refused when comp_len * 10
 would wrap, and a partially set or inverted recorded video range fails closed
 instead of being ignored.
 
-Scope of this diagnostic:
+Scope:
 
 - Only the three writes below are checked, and only against the recorded
   video reservation. No other reserved memory, LMB region, load address or
@@ -27,7 +27,7 @@ Scope of this diagnostic:
   pre-existing early returns for a missing kernel_comp_addr_r/kernel_comp_size
   in the same block; the boot aborts, so nothing is loaded afterwards.
 
-Compiled only with the opt-in WIP configuration; not release code.
+Compiled only with the opt-in guarded-handoff configuration.
 
 ---
 --- a/cmd/booti.c
@@ -38,7 +38,7 @@ Compiled only with the opt-in WIP configuration; not release code.
  DECLARE_GLOBAL_DATA_PTR;
 +
 +/*
-+ * Arcadia local diagnostic: would a write cover part of the framebuffer
++ * Arcadia guarded handoff: would a write cover part of the framebuffer
 + * reservation recorded by video_reserve()?
 + *
 + * The decision uses only gd_video_bottom()/gd_video_top(), so it needs no

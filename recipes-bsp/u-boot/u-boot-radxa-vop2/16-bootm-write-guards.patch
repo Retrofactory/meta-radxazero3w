@@ -1,5 +1,5 @@
 Subject: [PATCH] bootm: refuse framebuffer writes in bootm_load_os()
-Upstream-Status: Inappropriate [local diagnostic]
+Upstream-Status: Inappropriate [board-specific]
 
 bootm_load_os() makes two writes into addresses taken from the OS image
 metadata and the arm64 Image header without comparing either of them with the
@@ -63,7 +63,7 @@ The check is against the widest window the decompressor may write, so a
 refusal can be conservative: an image that would have decompressed into a
 smaller window is refused just the same.
 
-Scope of this diagnostic:
+Scope:
 
 - Only the two writes above are checked, and only against the recorded video
   reservation. No other reserved memory, LMB region, load address, source
@@ -84,7 +84,7 @@ Scope of this diagnostic:
 - A refusal prints a guard message and returns BOOTM_ERR_RESET, the same
   "reset to recover" outcome as a failed decompression.
 
-Compiled only with the opt-in WIP configuration; not release code.
+Compiled only with the opt-in guarded-handoff configuration.
 
 ---
 --- a/boot/bootm.c
@@ -101,7 +101,7 @@ Compiled only with the opt-in WIP configuration; not release code.
  DECLARE_GLOBAL_DATA_PTR;
  
 +/*
-+ * Arcadia local diagnostic: would a write cover part of the framebuffer
++ * Arcadia guarded handoff: would a write cover part of the framebuffer
 + * reservation recorded by video_reserve()?
 + *
 + * The decision uses only gd_video_bottom()/gd_video_top(), so it needs no

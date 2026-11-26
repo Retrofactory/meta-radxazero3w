@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Compile and exercise the bootm framebuffer pre-write guards from the WIP patch.
+"""Compile and exercise the bootm framebuffer pre-write guards from the patch.
 
 Three layers run here:
 
-1. Patch-scope checks: 16-bootm-write-guards.WIP.patch must touch only
+1. Patch-scope checks: 16-bootm-write-guards.patch must touch only
    boot/bootm.c, may add only <limits.h>, and must contain no removed line, so
    every existing load, blob-overlap and booti setup step in that file is
    unchanged.
@@ -40,7 +40,7 @@ import subprocess
 import tempfile
 
 RECIPE = Path(__file__).resolve().parents[1]
-PATCH = RECIPE / "16-bootm-write-guards.WIP.patch"
+PATCH = RECIPE / "16-bootm-write-guards.patch"
 SOURCE = Path(os.environ.get("ARCADIA_UBOOT_SOURCE", "/tmp/arcadia-uboot-vop2/source"))
 
 
@@ -948,6 +948,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="arcadia-bootm-test-") as tmp:
         compile_and_run(tmp, "helper_test", BASE_PRELUDE + helpers + HELPER_TESTS)
         if not (SOURCE / "boot" / "bootm.c").is_file():
+            if "ARCADIA_UBOOT_SOURCE" in os.environ:
+                raise SystemExit(f"call-site tests: incomplete U-Boot source at {SOURCE}")
             print(f"call-site tests skipped: no U-Boot source at {SOURCE}")
             return
         patched = patched_bootm()

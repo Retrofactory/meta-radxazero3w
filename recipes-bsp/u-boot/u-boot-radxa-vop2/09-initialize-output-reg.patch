@@ -1,5 +1,5 @@
 Subject: [PATCH] video: rockchip: initialize RK3568 output register
-Upstream-Status: Inappropriate [local diagnostic]
+Upstream-Status: Inappropriate [board-specific]
 
 Initialize the value before ORing output enable and mux bits.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-side structural checks for the artwork-cleanup profile.
+"""Host-side structural checks for the artwork patch and the guarded profile.
 
 These checks do not exercise U-Boot, a filesystem, display hardware or DMA.
 """
@@ -10,35 +10,26 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
-class CleanupArtworkTest(unittest.TestCase):
+class ArtworkTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.patch = (ROOT / "arcadia-boot-artwork.patch").read_text()
-        cls.conf = (ROOT / "artwork-cleanup.conf").read_text() + (ROOT / "vop2-base.inc").read_text()
+        cls.conf = (ROOT / "guarded-handoff.conf").read_text()
 
-    def test_no_handoff_patch_and_cleanup_enabled(self):
-        self.assertNotIn("radxa-guarded-logo-handoff", self.conf)
-        self.assertNotIn("vop2-handoff.WIP.cfg", self.conf)
-        self.assertIn("file://arcadia-boot-artwork.patch", self.conf)
+    def test_artwork_patch_is_independent_of_handoff(self):
         self.assertNotIn("handoff_ready", self.patch)
         self.assertNotIn("arcadia_handoff", self.patch)
         self.assertIn("CONFIG_VIDEO_REMOVE=y", (ROOT / "vop2-video.cfg").read_text())
 
-    def test_profiles_keep_cleanup_independent_and_guards_together(self):
-        cleanup = (ROOT / 'artwork-cleanup.conf').read_text()
-        handoff = (ROOT / 'guarded-handoff.WIP.conf').read_text()
-        base = (ROOT / 'vop2-base.inc').read_text()
-        for profile in (cleanup, handoff):
-            self.assertIn('require vop2-base.inc', profile.splitlines())
-        self.assertFalse(re.findall(r'file://(\S+\.patch)', cleanup))
-        self.assertNotIn('handoff', base)
-        self.assertEqual(re.findall(r'file://(\S+\.patch)', handoff), [
-            'radxa-guarded-logo-handoff.WIP.patch', '14-guard-extlinux-reads.WIP.patch',
-            '15-booti-write-guards.WIP.patch', '16-bootm-write-guards.WIP.patch',
+    def test_profile_patch_order_and_scope(self):
+        patches = re.findall(r'file://(\S+\.patch)', self.conf)
+        self.assertEqual(patches[-4:], [
+            'radxa-guarded-logo-handoff.patch', '14-guard-extlinux-reads.patch',
+            '15-booti-write-guards.patch', '16-bootm-write-guards.patch',
         ])
-        for text in (base, cleanup, handoff):
-            self.assertNotIn('IMAGE_BOOT_FILES', text)
-            self.assertNotIn('WKS_FILE_DEPENDS', text)
+        self.assertIn('arcadia-boot-artwork.patch', patches)
+        for name in ('IMAGE_BOOT_FILES', 'WKS_FILE_DEPENDS'):
+            self.assertNotIn(name, self.conf)
 
     def test_boot_medium_lookup_fails_closed(self):
         for required in ('"u-boot,spl-boot-device"', '"boot"',

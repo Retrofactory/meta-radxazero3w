@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile and exercise guard helpers and board hooks from the WIP patch.
+"""Compile and exercise guard helpers and board hooks from the patch.
 
 The tiny fake LMB/FDT objects test decision logic, not libfdt, actual hook
 invocation in U-Boot, hardware or IOMMU behavior. Requires a host C compiler.
@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-PATCH = Path(__file__).resolve().parents[1] / "radxa-guarded-logo-handoff.WIP.patch"
+PATCH = Path(__file__).resolve().parents[1] / "radxa-guarded-logo-handoff.patch"
 
 
 def added_function(name):

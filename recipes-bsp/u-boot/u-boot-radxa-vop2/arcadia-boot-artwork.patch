@@ -1,9 +1,9 @@
 Subject: [PATCH] video: show Arcadia artwork with normal cleanup
-Upstream-Status: Inappropriate [board-specific diagnostic]
+Upstream-Status: Inappropriate [board-specific]
 
 Display the fixed artwork only from the SPL-selected MMC boot partition.
 This version has no loader-logo handoff: normal U-Boot VIDEO_REMOVE remains
-in force. Missing or invalid artwork is not fatal. It is not release code.
+in force. Missing or invalid artwork is not fatal.
 
 --- a/drivers/video/video-uclass.c
 +++ b/drivers/video/video-uclass.c
