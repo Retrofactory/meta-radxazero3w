@@ -67,6 +67,9 @@ DEPENDS += "gnutls-native python3-pyelftools-native python3-native bc-native dtc
 
 # --- Rockchip multi-stage artefact staging ---------------------------------
 RK = "${UNPACKDIR}/rkbin"
+# The standard BL31 v1.46 boots Linux on CPU0 and passed delayed-boot tests
+# on the Radxa ZERO 3W. Keep an override for controlled firmware comparisons.
+RADXA_BL31_FILE ?= "rk3568_bl31_v1.46.elf"
 
 # Required by the rockchip make_fit_atf.sh pre-processor in SPL build:
 # BL31 = arm-trusted-firmware (.elf), ROCKCHIP_TPL = DDR init (.bin).
@@ -76,11 +79,10 @@ RK = "${UNPACKDIR}/rkbin"
 # at build time and matches the host gcc ABI exactly. No manual patch
 # needed.
 do_compile:prepend() {
-    # Match the radxa-zero3 radxa-rkbin fork layout: bl31 cpu3 v1.01
-    # plus rk3566_ddr_1056MHz_v1.25 (the OEM-pinned variant).
-    if [ -f ${RK}/bin/rk35/rk3568_bl31_cpu3_v1.01.elf ]; then
-        cp -a ${RK}/bin/rk35/rk3568_bl31_cpu3_v1.01.elf  ${S}/
-    fi
+    # Keep the pinned DDR blob; BL31 can be overridden for isolated
+    # firmware comparisons.
+    [ -f ${RK}/bin/rk35/${RADXA_BL31_FILE} ] || bbfatal "Missing BL31: ${RADXA_BL31_FILE}"
+    cp -a ${RK}/bin/rk35/${RADXA_BL31_FILE} ${S}/
     if [ -f ${RK}/bin/rk35/rk3566_ddr_1056MHz_v1.25.bin ]; then
         cp -a ${RK}/bin/rk35/rk3566_ddr_1056MHz_v1.25.bin ${S}/
     fi
@@ -93,7 +95,7 @@ do_compile:prepend() {
     # stamp fails with "'simple-bin' is missing external blobs" even
     # though the source files exist on disk. We export in the same
     # shell that invokes oe_runmake below so they take effect.
-    [ -f ${S}/rk3568_bl31_cpu3_v1.01.elf ]    && export BL31=${S}/rk3568_bl31_cpu3_v1.01.elf
+    export BL31=${S}/${RADXA_BL31_FILE}
     [ -f ${S}/rk3566_ddr_1056MHz_v1.25.bin ]  && export ROCKCHIP_TPL=${S}/rk3566_ddr_1056MHz_v1.25.bin
 }
 

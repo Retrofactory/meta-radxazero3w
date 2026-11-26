@@ -1,0 +1,258 @@
+Subject: [PATCH] bootm: refuse framebuffer writes in bootm_load_os()
+Upstream-Status: Inappropriate [local diagnostic]
+
+bootm_load_os() makes two writes into addresses taken from the OS image
+metadata and the arm64 Image header without comparing either of them with the
+framebuffer reservation recorded by video_reserve():
+
+  1. image_decomp() writes the decompressed OS image straight into the load
+     address. The only output bound bootm_load_os() gives the decompressor is
+     CONFIG_SYS_BOOTM_LEN, so that declared window - not the actual, unknown
+     uncompressed size and not any smaller allocation - is what this guard
+     checks before the write.
+  2. The optional ARM64 relocation memmoves exactly image_size bytes, the
+     "effective image size" read from the arm64 Image header by
+     booti_setup(), to relocated_addr. That is an exact length, so the exact
+     window is checked before the memmove.
+
+Both checks use only gd_video_bottom()/gd_video_top() and wrap-safe
+arithmetic, in the same shape as the booti guard in patch 15. A partially set
+or inverted recorded video range fails closed, a destination whose end address
+would wrap is refused, and no window is checked when nothing is written.
+
+Per compression type, the window checked for write 1 is:
+
+  - IH_COMP_NONE: exactly image_len bytes. image.c copies with memmove_wd()
+    only when image_len <= unc_len, and returns -ENOSPC without writing
+    otherwise, which is reported as a refusal here.
+  - IH_COMP_GZIP: at most unc_len bytes (lib/zlib/inflate.c limits every
+    literal and match copy to avail_out, which zunzip() sets from the length
+    it is given). lib/gunzip.c takes that length as an int, so a
+    CONFIG_SYS_BOOTM_LEN above INT_MAX would narrow - or negate - the bound
+    before zlib sees it; such a value is refused instead of being checked with
+    a window narrower than the one that would be used.
+  - IH_COMP_BZIP2: at most unc_len bytes. lib/bzip2/bzlib.c passes *destLen
+    to BZ2_bzDecompress() as avail_out and reports BZ_OUTBUFF_FULL instead of
+    running past it.
+  - IH_COMP_LZO: at most unc_len bytes. lib/lzo/lzo1x_decompress.c tracks the
+    bytes left in the destination and returns LZO_E_OUTPUT_OVERRUN before
+    writing a block that does not fit; lzo1x_decompress_safe() bounds each
+    copy with HAVE_OP().
+  - IH_COMP_LZMA: at most unc_len bytes. lib/lzma/LzmaTools.c returns
+    SZ_ERROR_OUTPUT_EOF before decompressing when the size declared in the
+    LZMA header exceeds the buffer, and never processes more than the buffer
+    holds.
+  - IH_COMP_LZ4: at most unc_len bytes. lib/lz4_wrapper.c bounds every block
+    with the remaining destination capacity and stops with -ENOBUFS.
+  - IH_COMP_ZSTD: at most unc_len bytes. lib/zstd/zstd.c hands the buffer as
+    the frame destination capacity, which is an error, not a longer write,
+    when it is too small.
+
+Any other compression type has no in-tree implementation this guard can bound,
+so it is refused before image_decomp() runs.
+
+An uncompressed image that is already at its load address is not copied at
+all - image_decomp() returns early - so no window is checked for it and a
+malformed video range does not block that boot. For a KERNEL_NOLOAD image the
+decompression window deliberately starts at the freshly allocated buffer and
+is unc_len long: image_decomp() is told CONFIG_SYS_BOOTM_LEN bytes are
+available even when ALIGN(image_len * 4, SZ_1M) allocated less, so the check
+must not be narrower than what the decompressor was told.
+
+The check is against the widest window the decompressor may write, so a
+refusal can be conservative: an image that would have decompressed into a
+smaller window is refused just the same.
+
+Scope of this diagnostic:
+
+- Only the two writes above are checked, and only against the recorded video
+  reservation. No other reserved memory, LMB region, load address, source
+  address or image-header field is revalidated, and nothing is reserved,
+  relocated or decompressed differently.
+- The existing legacy/new-format overwrite check on the OS blob and the LMB
+  allocation that follows decompression are unchanged and keep their place in
+  the sequence: the guard is added immediately before each write.
+- Not covered: the pre-loading of FIT/bootm payloads (bootm_find_images and
+  the FIT loader write the kernel, initrd and FDT before bootm_load_os() is
+  reached), raw load/acp commands, initrd and FDT placement, EFI loaders, the
+  other bootmeths, extlinux reads (patch 14 covers only that reader) and an
+  active IOMMU during handoff. Nothing here is evidence that handoff is safe.
+- The cache maintenance that follows the decompression (flush_cache over the
+  decompressed range) and the LMB bookkeeping are not payload writes and are
+  not checked; in the no-copy case that flush still spans the source image
+  without any window check.
+- A refusal prints a guard message and returns BOOTM_ERR_RESET, the same
+  "reset to recover" outcome as a failed decompression.
+
+Compiled only with the opt-in WIP configuration; not release code.
+
+---
+--- a/boot/bootm.c
++++ b/boot/bootm.c
+@@ -15,5 +15,6 @@
+ #include <irq_func.h>
+ #include <lmb.h>
++#include <limits.h>
+ #include <log.h>
+ #include <malloc.h>
+ #include <mapmem.h>
+@@ -44,6 +45,118 @@
+ 
+ DECLARE_GLOBAL_DATA_PTR;
+ 
++/*
++ * Arcadia local diagnostic: would a write cover part of the framebuffer
++ * reservation recorded by video_reserve()?
++ *
++ * The decision uses only gd_video_bottom()/gd_video_top(), so it needs no
++ * driver or devicetree access and is a no-op when video reserved nothing.
++ * It protects that single range only; other reserved memory, the LMB map and
++ * the boot payload itself are unchanged.
++ *
++ * @addr:	address the write starts at
++ * @size:	number of bytes the write covers
++ * Return:	0 to allow the write, -ERANGE for an unusable video range or a
++ *		wrapping destination, -EPERM if the destination overlaps video
++ */
++static int arcadia_bootm_video_write_check(ulong addr, ulong size)
++{
++	ulong bottom = gd_video_bottom();
++	ulong top = gd_video_top();
++
++	/* No video reservation: nothing to protect, so leave the write alone. */
++	if (!bottom && !top)
++		return 0;
++
++	/* A partial or inverted range cannot be checked, so fail closed. */
++	if (!bottom || top <= bottom)
++		return -ERANGE;
++
++	/* A zero-length write covers no bytes. */
++	if (!size)
++		return 0;
++
++	/* Reject a destination end address that would wrap. */
++	if (addr + size < addr)
++		return -ERANGE;
++
++	/* Writes wholly below or wholly above the reservation are unaffected. */
++	if (addr >= top || addr + size <= bottom)
++		return 0;
++
++	return -EPERM;
++}
++
++/**
++ * arcadia_bootm_decomp_guard() - bound the bootm decompression write window
++ * @comp:	compression type recorded for the OS image
++ * @load:	address image_decomp() decompresses into
++ * @image_start: address the image is read from
++ * @image_len:	image length recorded by the image parser
++ * @unc_len:	CONFIG_SYS_BOOTM_LEN, the output size handed to image_decomp()
++ *
++ * bootm_load_os() decompresses straight into the load address, and it tells
++ * image_decomp() that @unc_len bytes are available. That declared size, not
++ * any smaller allocation, is the only bound this guard can assert without
++ * knowing the actual uncompressed length in advance. Per compression type:
++ *
++ * - IH_COMP_NONE copies exactly @image_len bytes, or nothing at all when
++ *   @image_len exceeds @unc_len (image.c then returns -ENOSPC unwritten).
++ * - IH_COMP_GZIP writes at most @unc_len bytes, but lib/gunzip.c passes the
++ *   length to zlib as an int. A value that does not land in the positive
++ *   range is refused rather than checked with the wrong bound.
++ * - IH_COMP_BZIP2, IH_COMP_LZO, IH_COMP_LZMA, IH_COMP_LZ4 and IH_COMP_ZSTD
++ *   write at most @unc_len bytes: each in-tree implementation receives that
++ *   size as its output capacity and reports an error instead of running
++ *   past it.
++ * - Any other type cannot be bounded here, so it is refused.
++ *
++ * The check is against the widest window the decompressor may write, so a
++ * refusal can be conservative: an image that would have decompressed into a
++ * smaller window is refused just the same.
++ *
++ * Return:	0 if the write (if any) misses the recorded video reservation,
++ *		-EPERM if it would cover part of it, -ERANGE for a window that
++ *		cannot be expressed, -ENOSPC for an uncompressed image larger
++ *		than the buffer and -ENOTSUPP for an unbounded compression type
++ */
++static int arcadia_bootm_decomp_guard(int comp, ulong load, ulong image_start,
++				      ulong image_len, ulong unc_len)
++{
++	ulong size;
++
++	/*
++	 * image_decomp() writes nothing when an uncompressed image is already
++	 * at its load address, so there is no write window to check here.
++	 */
++	if (comp == IH_COMP_NONE && load == image_start)
++		return 0;
++
++	switch (comp) {
++	case IH_COMP_NONE:
++		if (image_len > unc_len)
++			return -ENOSPC;
++		size = image_len;
++		break;
++	case IH_COMP_GZIP:
++		if (unc_len > INT_MAX)
++			return -ERANGE;
++		size = unc_len;
++		break;
++	case IH_COMP_BZIP2:
++	case IH_COMP_LZO:
++	case IH_COMP_LZMA:
++	case IH_COMP_LZ4:
++	case IH_COMP_ZSTD:
++		size = unc_len;
++		break;
++	default:
++		return -ENOTSUPP;
++	}
++
++	return arcadia_bootm_video_write_check(load, size);
++}
++
+ struct bootm_headers images;		/* pointers to os/initrd/fdt images */
+ 
+ __weak void board_quiesce_devices(void)
+@@ -649,6 +762,20 @@
+ 
+ 	load_buf = map_sysmem(load, 0);
+ 	image_buf = map_sysmem(os.image_start, image_len);
++	/*
++	 * Arcadia: bound the decompression write before image_decomp() runs.
++	 * Refusing here leaves the board needing a reset, exactly like a
++	 * failed decompression.
++	 */
++	err = arcadia_bootm_decomp_guard(os.comp, load, image_start, image_len,
++					 CONFIG_SYS_BOOTM_LEN);
++	if (err) {
++		printf("Arcadia bootm guard: decompress %lx bound %lx, video %lx-%lx err %d\n",
++		       load, (ulong)CONFIG_SYS_BOOTM_LEN, gd_video_bottom(),
++		       gd_video_top(), err);
++		return BOOTM_ERR_RESET;
++	}
++
+ 	err = image_decomp(os.comp, load, os.image_start, os.type,
+ 			   load_buf, image_buf, image_len,
+ 			   CONFIG_SYS_BOOTM_LEN, &load_end);
+@@ -701,6 +828,19 @@
+ 
+ 		/* Handle BOOTM_STATE_LOADOS */
+ 		if (relocated_addr != load) {
++			/*
++			 * Arcadia: the relocation copies exactly image_size
++			 * bytes from the Image header, so check that window
++			 * before the memmove writes it.
++			 */
++			ret = arcadia_bootm_video_write_check(relocated_addr,
++							     image_size);
++			if (ret) {
++				printf("Arcadia bootm guard: relocate %lx size %lx, video %lx-%lx err %d\n",
++				       relocated_addr, image_size,
++				       gd_video_bottom(), gd_video_top(), ret);
++				return BOOTM_ERR_RESET;
++			}
+ 			printf("Moving Image from 0x%lx to 0x%lx, end=0x%lx\n",
+ 			       load, relocated_addr,
+ 			       relocated_addr + image_size);

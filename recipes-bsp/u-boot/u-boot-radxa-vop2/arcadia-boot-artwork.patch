@@ -1,0 +1,103 @@
+Subject: [PATCH] video: show Arcadia artwork with normal cleanup
+Upstream-Status: Inappropriate [board-specific diagnostic]
+
+Display the fixed artwork only from the SPL-selected MMC boot partition.
+This version has no loader-logo handoff: normal U-Boot VIDEO_REMOVE remains
+in force. Missing or invalid artwork is not fatal. It is not release code.
+
+--- a/drivers/video/video-uclass.c
++++ b/drivers/video/video-uclass.c
+@@ -6,19 +6,24 @@
+ #define LOG_CATEGORY UCLASS_VIDEO
+ 
+ #include <bloblist.h>
++#include <blk.h>
+ #include <console.h>
+ #include <cpu_func.h>
+ #include <cyclic.h>
+ #include <dm.h>
++#include <fs.h>
+ #include <log.h>
+ #include <malloc.h>
+ #include <mapmem.h>
++#include <part.h>
+ #include <spl.h>
++#include <splash.h>
+ #include <stdio_dev.h>
+ #include <video.h>
+ #include <video_console.h>
+ #include <asm/cache.h>
+ #include <asm/global_data.h>
++#include <asm/unaligned.h>
+ #include <dm/lists.h>
+ #include <dm/device_compat.h>
+ #include <dm/device-internal.h>
+@@ -592,13 +597,65 @@
+ 	return SPLASH_START(u_boot_logo);
+ }
+ 
++/* Only use artwork on the boot partition of the SPL-selected MMC. */
++static int arcadia_select_boot_partition(void)
++{
++	const char *path = ofnode_read_chosen_string("u-boot,spl-boot-device");
++	struct disk_partition info;
++	struct blk_desc *desc;
++	struct udevice *mmc, *block;
++	ofnode node;
++	int part;
++
++	if (!path)
++		return -ENODEV;
++	node = ofnode_path(path);
++	if (!ofnode_valid(node) ||
++	    uclass_find_device_by_ofnode(UCLASS_MMC, node, &mmc) ||
++	    blk_get_from_parent(mmc, &block))
++		return -ENODEV;
++	desc = dev_get_uclass_plat(block);
++	part = part_get_info_by_name(desc, "boot", &info);
++	if (part < 1)
++		return -ENOENT;
++	return fs_set_blk_dev_with_part(desc, part);
++}
++
+ static int show_splash(struct udevice *dev)
+ {
+-	u8 *data = SPLASH_START(u_boot_logo);
++	const char *path = "/arcadia-splash.bmp";
++	const size_t size = 2764854;
++	struct video_priv *priv = dev_get_uclass_priv(dev);
++	loff_t actual = 0;
++	u8 *data;
+ 	int ret;
+ 
+-	ret = video_bmp_display(dev, map_to_sysmem(data), -4, 4, true);
+-
++	if (priv->xsize < 1280 || priv->ysize < 720)
++		return 0;
++	data = malloc(size + 1);
++	if (!data)
++		return 0;
++	/* Fail closed if SPL did not identify the medium; never search others. */
++	ret = arcadia_select_boot_partition();
++	if (!ret)
++		ret = fs_read(path, map_to_sysmem(data), 0, size + 1, &actual);
++	if (ret || actual != size || data[0] != 'B' || data[1] != 'M' ||
++	    get_unaligned_le32(data + 2) != size ||
++	    get_unaligned_le32(data + 10) != 54 ||
++	    get_unaligned_le32(data + 14) != 40 ||
++	    get_unaligned_le32(data + 18) != 1280 ||
++	    get_unaligned_le32(data + 22) != 720 ||
++	    get_unaligned_le16(data + 26) != 1 ||
++	    get_unaligned_le16(data + 28) != 24 ||
++	    get_unaligned_le32(data + 30) != 0) {
++		printf("Arcadia artwork unavailable or invalid; continuing without it\n");
++		free(data);
++		return 0;
++	}
++	ret = video_bmp_display(dev, map_to_sysmem(data), BMP_ALIGN_CENTER,
++				BMP_ALIGN_CENTER, true);
++	free(data);
++	printf("Arcadia artwork: %s\n", ret ? "display failed" : "displayed");
+ 	return 0;
+ }
+ 

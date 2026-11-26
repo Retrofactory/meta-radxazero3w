@@ -1,0 +1,101 @@
+Subject: [PATCH] bootstd: refuse extlinux reads over the video reservation
+Upstream-Status: Inappropriate [local diagnostic]
+
+Extlinux reads filesystem data to an address taken from its configuration
+before any late check looks at the video reservation. Reject a read whose
+destination would overlap the framebuffer carved out by video_reserve(),
+using only gd_video_bottom()/gd_video_top() and wrap-safe arithmetic. Bound
+the actual extlinux read to the checked nonzero file size, and reject short
+reads; fs_read() with length zero otherwise means read the whole file even if
+its size changes between the check and read. Other bootmeths are unchanged.
+Compiled only with the opt-in WIP configuration; not release code.
+
+--- a/boot/bootmeth-uclass.c
++++ b/boot/bootmeth-uclass.c
+@@ -425,6 +425,53 @@ int bootmeth_alloc_other(struct bootflow *bflow, const char *fname,
+ 	return 0;
+ }
+ 
++/*
++ * Arcadia local diagnostic: reject an extlinux filesystem read that would
++ * write over the video framebuffer reservation made by video_reserve().
++ *
++ * The decision uses only gd_video_bottom()/gd_video_top(), so it needs no
++ * driver or devicetree access and is a no-op when video reserved nothing.
++ *
++ * @addr:	address fs_read() would write to
++ * @size:	number of bytes fs_read() would write
++ * Return:	0 to allow the read, -ERANGE for an unusable video range or a
++ *		wrapping destination, -EPERM if the destination overlaps video
++ */
++static int arcadia_video_read_check(ulong addr, ulong size)
++{
++	ulong bottom = gd_video_bottom();
++	ulong top = gd_video_top();
++
++	/* No video reservation: nothing to protect, so leave the read alone. */
++	if (!bottom && !top)
++		return 0;
++
++	/* A partial or inverted range cannot be checked, so fail closed. */
++	if (!bottom || top <= bottom)
++		return -ERANGE;
++
++	/* A zero-length read writes no bytes. */
++	if (!size)
++		return 0;
++
++	/* Reject a destination end address that would wrap. */
++	if (addr + size < addr)
++		return -ERANGE;
++
++	/* Reads wholly below or wholly above the reservation are unaffected. */
++	if (addr >= top || addr + size <= bottom)
++		return 0;
++
++	return -EPERM;
++}
++
++/* Match the registered .name, not the U_BOOT_DRIVER symbol. */
++static bool arcadia_video_read_guarded(const struct udevice *dev)
++{
++	return dev && dev->driver && dev->driver->name &&
++	       !strcmp(dev->driver->name, "bootmeth_extlinux");
++}
++
+ int bootmeth_common_read_file(struct udevice *dev, struct bootflow *bflow,
+ 			      const char *file_path, ulong addr,
+ 			      enum bootflow_img_t type, ulong *sizep)
+@@ -447,14 +494,31 @@ int bootmeth_common_read_file(struct udevice *dev, struct bootflow *bflow,
+ 	if (size > *sizep)
+ 		return log_msg_ret("spc", -ENOSPC);
+ 
++	/* Arcadia: check and bound the extlinux read before it writes. */
++	if (arcadia_video_read_guarded(dev)) {
++		/* fs_read len=0 means the entire file, not a zero-byte read. */
++		if (size <= 0)
++			return log_msg_ret("size", -EINVAL);
++		ret = arcadia_video_read_check(addr, (ulong)size);
++		if (ret) {
++			printf("Arcadia video guard: %s at %lx size %lx, video %lx-%lx\n",
++			       file_path, addr, (ulong)size, gd_video_bottom(),
++			       gd_video_top());
++			return log_msg_ret("video", ret);
++		}
++	}
++
+ 	ret = bootmeth_setup_fs(bflow, desc);
+ 	if (ret)
+ 		return log_msg_ret("fs", ret);
+ 
+-	ret = fs_read(file_path, addr, 0, 0, &len_read);
++	ret = fs_read(file_path, addr, 0,
++		      arcadia_video_read_guarded(dev) ? size : 0, &len_read);
+ 	if (ret)
+ 		return ret;
++	if (arcadia_video_read_guarded(dev) && len_read != size)
++		return log_msg_ret("size", -EIO);
+ 	*sizep = len_read;
+ 
+ 	if (!bootflow_img_add(bflow, bflow->fname, type, addr, size))
+ 		return log_msg_ret("bci", -ENOMEM);

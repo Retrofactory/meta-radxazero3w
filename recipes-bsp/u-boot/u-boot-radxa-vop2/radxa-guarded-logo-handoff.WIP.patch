@@ -1,0 +1,447 @@
+Subject: [PATCH] radxa: preserve scanout only for a guarded loader-logo handoff
+Upstream-Status: Inappropriate [board-specific diagnostic]
+
+Requires the boot-medium artwork patch. Keep the normal removal path unless
+the artwork succeeded and the mode, reservation, boot path and FDT pass
+the handoff checks. This does not validate the Linux takeover.
+
+--- a/board/radxa/zero3-rk3566/zero3-rk3566.c
++++ b/board/radxa/zero3-rk3566/zero3-rk3566.c
+@@ -4,6 +4,33 @@
+ #include <linux/kernel.h>
+ #include <adc.h>
+ #include <env.h>
++
++#ifndef CONFIG_XPL_BUILD
++struct bd_info;
++int rk_vop2_arcadia_handoff(void *blob);
++void rk_vop2_arcadia_handoff_reset(void);
++static bool arcadia_bootm_active;
++
++void board_bootm_start(void)
++{
++	rk_vop2_arcadia_handoff_reset();
++	arcadia_bootm_active = true;
++}
++
++void board_bootm_cancel(void)
++{
++	rk_vop2_arcadia_handoff_reset();
++	arcadia_bootm_active = false;
++}
++
++int ft_board_setup(void *blob, struct bd_info *bd)
++{
++	rk_vop2_arcadia_handoff_reset();
++	if (arcadia_bootm_active && env_get_yesno("arcadia_handoff") == 1)
++		rk_vop2_arcadia_handoff(blob);
++	return 0;
++}
++#endif
+ 
+ #define HW_ID_CHANNEL	1
+ 
+--- a/boot/bootm.c
++++ b/boot/bootm.c
+@@ -240,8 +240,18 @@
+ 	return 0;
+ }
+ 
++/* Experimental board hook: reset per-boot state before any new attempt. */
++__weak void board_bootm_start(void)
++{
++}
++
++__weak void board_bootm_cancel(void)
++{
++}
++
+ static int bootm_start(void)
+ {
++	board_bootm_start();
+ 	memset((void *)&images, 0, sizeof(images));
+ 	images.verify = env_get_yesno("verify");
+ 
+--- a/boot/image-fdt.c
++++ b/boot/image-fdt.c
+@@ -9,6 +9,7 @@
+  */
+ 
+ #include <command.h>
++#include <bootm.h>
+ #include <fdt_support.h>
+ #include <fdtdec.h>
+ #include <efi.h>
+@@ -590,6 +591,10 @@
+ 	bool skip_board_fixup = false;
+ 	int ret, fdt_ret, of_size;
+ 
++	/* EFI and ELF FDT setup is not the bootm Linux handoff. */
++	if (!lmb)
++		board_bootm_cancel();
++
+ 	if (IS_ENABLED(CONFIG_OF_ENV_SETUP)) {
+ 		const char *fdt_fixup;
+ 
+--- a/drivers/video/rockchip/rk3568_vop.c
++++ b/drivers/video/rockchip/rk3568_vop.c
+@@ -159,7 +159,7 @@
+  */
+ static int rk3568_vop_remove(struct udevice *dev)
+ {
+-	if (CONFIG_IS_ENABLED(VIDEO_REMOVE)) {
++	if (CONFIG_IS_ENABLED(VIDEO_REMOVE) && !rk_vop2_arcadia_handoff_ready()) {
+ 		struct rk_vop2_priv *priv = dev_get_priv(dev);
+ 		struct rk3568_vop_sysctrl *sysctrl = priv->regs + VOP2_SYSREG_OFFSET;
+ 		struct rk3568_vop_esmart *esmart = priv->regs + VOP2_ESMART_OFFSET(priv->layer - 4);
+--- a/drivers/video/rockchip/rk_vop2.c
++++ b/drivers/video/rockchip/rk_vop2.c
+@@ -13,6 +13,9 @@
+ #include <dm/device_compat.h>
+ #include <edid.h>
+ #include <log.h>
++#include <lmb.h>
++#include <malloc.h>
++#include <linux/libfdt.h>
+ #include <regmap.h>
+ #include <reset.h>
+ #include <syscon.h>
+@@ -462,11 +465,258 @@
+ 	uc_priv->bpix = l2bpp;
+ 
+ 	priv->vp = port_id;
++	priv->output_mode = vop_id;
++	priv->timing = timing;
++	priv->timing_valid = true;
+ 
+ 	debug("fb=%lx, size=%d %d\n", fbbase,
+ 	      uc_priv->xsize, uc_priv->ysize);
+ 
+ 	return 0;
++}
++
++/* Local diagnostic: preserve scanout only after a complete, validated FDT handoff. */
++extern bool arcadia_artwork_shown;
++static bool arcadia_handoff_ready;
++
++void rk_vop2_arcadia_handoff_reset(void)
++{
++	arcadia_handoff_ready = false;
++}
++
++/* Require one existing non-overwritable LMB region to cover every byte. */
++static bool arcadia_fb_reserved(ulong base, ulong size)
++{
++	struct lmb *map = lmb_get();
++	struct lmb_region *regions = map->used_mem.data;
++	int i;
++
++	if (!size || base + size < base)
++		return false;
++	for (i = 0; i < map->used_mem.count; i++) {
++		struct lmb_region *r = &regions[i];
++		ulong offset;
++
++		if (!(r->flags & LMB_NOOVERWRITE) || base < r->base)
++			continue;
++		offset = base - r->base;
++		if (offset <= r->size && size <= r->size - offset)
++			return true;
++	}
++	return false;
++}
++
++static bool arcadia_fdt_enabled(const void *blob, int node)
++{
++	const char *status;
++	int len;
++
++	status = fdt_getprop(blob, node, "status", &len);
++	if (!status)
++		return len == -FDT_ERR_NOTFOUND;
++	return (len == 3 && !memcmp(status, "ok", 3)) ||
++	       (len == 5 && !memcmp(status, "okay", 5));
++}
++
++/* Only preserve if Linux is explicitly requested to use the tested mode. */
++static bool arcadia_linux_mode_matches(const void *blob)
++{
++	static const char prefix[] = "video=";
++	static const char allowed[] = "video=HDMI-A-1:1920x1080@60";
++	const char *args, *end, *p;
++	int chosen, len, matches = 0;
++
++	chosen = fdt_path_offset(blob, "/chosen");
++	if (chosen < 0)
++		return false;
++	args = fdt_getprop(blob, chosen, "bootargs", &len);
++	if (!args || len < 1 || args[len - 1] != '\0' ||
++	    strnlen(args, len) != (size_t)len - 1)
++		return false;
++	end = args + len - 1;
++	/* Reject shell quoting/escaping and non-space whitespace; do not guess
++	 * how the kernel will split such a command line.
++	 */
++	for (p = args; p < end; p++) {
++		if ((*p > 0 && *p < ' ') || *p == '\\' || *p == '\"' || *p == '\'')
++			return false;
++	}
++	for (p = args; p < end;) {
++		const char *start;
++		size_t n;
++
++		while (p < end && *p == ' ')
++			p++;
++		start = p;
++		while (p < end && *p != ' ')
++			p++;
++		n = p - start;
++		if (n == 2 && !memcmp(start, "--", 2))
++			return false;
++		if (n >= sizeof(prefix) - 1 &&
++		    !memcmp(start, prefix, sizeof(prefix) - 1)) {
++			if (n != sizeof(allowed) - 1 ||
++			    memcmp(start, allowed, sizeof(allowed) - 1))
++				return false;
++			matches++;
++		}
++	}
++	return matches == 1;
++}
++
++bool rk_vop2_arcadia_handoff_ready(void)
++{
++	return arcadia_handoff_ready;
++}
++
++int rk_vop2_arcadia_handoff(void *blob)
++{
++	struct udevice *dev;
++	struct rk_vop2_priv *priv;
++	struct video_priv *vpriv;
++	struct video_uc_plat *plat;
++	struct display_timing *t;
++	fdt32_t reg[4];
++	void *copy;
++	ulong base, size;
++	u32 ep_phandle, logo_phandle;
++	const fdt32_t *regions;
++	int reserve, route, endpoint, display, resparent, vop, hdmi, index, ret;
++	int len, regions_len, ranges_len;
++	static const struct { const char *name; u32 value; } values[] = {
++		{ "logo,offset", 0 }, { "logo,width", 1920 },
++		{ "logo,height", 1080 }, { "logo,bpp", 32 },
++		{ "video,clock", 148500 }, { "video,hdisplay", 1920 },
++		{ "video,vdisplay", 1080 }, { "video,crtc_hsync_end", 2052 },
++		{ "video,crtc_vsync_end", 1089 }, { "video,vrefresh", 60 },
++		{ "video,flags", 5 }, { "video,aspect_ratio", 0 },
++		{ "overscan,left_margin", 100 }, { "overscan,right_margin", 100 },
++		{ "overscan,top_margin", 100 }, { "overscan,bottom_margin", 100 },
++	};
++	int i;
++
++	arcadia_handoff_ready = false;
++	if (!blob || fdt_check_header(blob))
++		return -EINVAL;
++	if (!arcadia_artwork_shown) {
++		printf("Arcadia handoff: no artwork; using normal cleanup\n");
++		return -EINVAL;
++	}
++	if (fdt_node_check_compatible(blob, 0, "radxa,zero-3"))
++		return -EINVAL;
++	if (!arcadia_linux_mode_matches(blob)) {
++		printf("Arcadia handoff: Linux mode not verified; using normal cleanup\n");
++		return -EINVAL;
++	}
++	uclass_find_first_device(UCLASS_VIDEO, &dev);
++	if (!dev || !device_active(dev) || strcmp(dev->name, "vop@fe040000"))
++		return -ENODEV;
++	priv = dev_get_priv(dev);
++	vpriv = dev_get_uclass_priv(dev);
++	plat = dev_get_uclass_plat(dev);
++	t = &priv->timing;
++	if (!priv->timing_valid || priv->vp != 0 ||
++	    priv->output_mode != VOP_MODE_HDMI ||
++	    vpriv->xsize != 1920 || vpriv->ysize != 1080 ||
++	    vpriv->bpix != VIDEO_BPP32 || vpriv->line_length != 7680 ||
++	    t->pixelclock.typ != 148500000 || t->hactive.typ != 1920 ||
++	    t->hfront_porch.typ != 88 || t->hsync_len.typ != 44 ||
++	    t->hback_porch.typ != 148 || t->vactive.typ != 1080 ||
++	    t->vfront_porch.typ != 4 || t->vsync_len.typ != 5 ||
++	    t->vback_porch.typ != 36 ||
++	    !(t->flags & DISPLAY_FLAGS_HSYNC_HIGH) ||
++	    !(t->flags & DISPLAY_FLAGS_VSYNC_HIGH) ||
++	    (t->flags & (DISPLAY_FLAGS_INTERLACED | DISPLAY_FLAGS_DOUBLESCAN |
++			 DISPLAY_FLAGS_DOUBLECLK))) {
++		printf("Arcadia handoff: unsupported display mode; using normal cleanup\n");
++		return -EINVAL;
++	}
++	base = plat->base;
++	size = gd->video_top - gd->video_bottom;
++	if (!base || base != gd->video_bottom || gd->video_top <= base ||
++	    base + size < base || base + size > gd->ram_top ||
++	    (base & 4095) || (size & 4095) || size > 0x4000000 ||
++	    size < (ulong)vpriv->line_length * vpriv->ysize ||
++	    !IS_ENABLED(CONFIG_LMB) || !arcadia_fb_reserved(base, size)) {
++		printf("Arcadia handoff: invalid framebuffer reservation\n");
++		return -EINVAL;
++	}
++	len = fdt_totalsize(blob);
++	copy = malloc(len);
++	if (!copy)
++		return -ENOMEM;
++	ret = fdt_open_into(blob, copy, len);
++	if (ret)
++		goto out;
++	reserve = fdt_path_offset(copy, "/reserved-memory/drm-logo@0");
++	route = fdt_path_offset(copy, "/display-subsystem/route/route-hdmi");
++	display = fdt_path_offset(copy, "/display-subsystem");
++	resparent = fdt_path_offset(copy, "/reserved-memory");
++	vop = fdt_path_offset(copy, "/vop@fe040000");
++	hdmi = fdt_path_offset(copy, "/hdmi@fe0a0000");
++	endpoint = fdt_path_offset(copy, "/vop@fe040000/ports/port@0/endpoint@3");
++	if (reserve < 0 || route < 0 || display < 0 || resparent < 0 ||
++	    vop < 0 || hdmi < 0 || endpoint < 0) {
++		ret = -FDT_ERR_NOTFOUND;
++		goto out;
++	}
++	if (!arcadia_fdt_enabled(copy, reserve) ||
++	    !arcadia_fdt_enabled(copy, resparent) ||
++	    !arcadia_fdt_enabled(copy, route) ||
++	    !arcadia_fdt_enabled(copy, fdt_parent_offset(copy, route)) ||
++	    !arcadia_fdt_enabled(copy, display) ||
++	    !arcadia_fdt_enabled(copy, vop) ||
++	    !arcadia_fdt_enabled(copy, hdmi) ||
++	    !arcadia_fdt_enabled(copy, endpoint) ||
++	    !arcadia_fdt_enabled(copy, fdt_parent_offset(copy, endpoint)) ||
++	    !arcadia_fdt_enabled(copy, fdt_parent_offset(copy, fdt_parent_offset(copy, endpoint))) ||
++	    fdt_address_cells(copy, resparent) != 2 ||
++	    fdt_size_cells(copy, resparent) != 2 ||
++	    !fdt_get_property(copy, resparent, "ranges", &ranges_len) ||
++	    ranges_len != 0) {
++		ret = -FDT_ERR_BADVALUE;
++		goto out;
++	}
++	ep_phandle = fdt_get_phandle(copy, endpoint);
++	logo_phandle = fdt_get_phandle(copy, reserve);
++	index = fdt_stringlist_search(copy, display, "memory-region-names", "drm-logo");
++	regions = fdt_getprop(copy, display, "memory-region", &regions_len);
++	if (!ep_phandle || !logo_phandle || index < 0 || !regions ||
++	    index >= regions_len / (int)sizeof(*regions) ||
++	    fdt32_to_cpu(regions[index]) != logo_phandle) {
++		ret = -FDT_ERR_BADPHANDLE;
++		goto out;
++	}
++	reg[0] = cpu_to_fdt32((u64)base >> 32);
++	reg[1] = cpu_to_fdt32(base);
++	reg[2] = cpu_to_fdt32((u64)size >> 32);
++	reg[3] = cpu_to_fdt32(size);
++	ret = fdt_setprop(copy, reserve, "reg", reg, sizeof(reg));
++	if (ret)
++		goto out;
++	/* A changed property size can move any following node. */
++	route = fdt_path_offset(copy, "/display-subsystem/route/route-hdmi");
++	if (route < 0) {
++		ret = route;
++		goto out;
++	}
++	ret = fdt_setprop_u32(copy, route, "connect", ep_phandle);
++	if (ret)
++		goto out;
++	for (i = 0; i < ARRAY_SIZE(values); i++) {
++		ret = fdt_setprop_u32(copy, route, values[i].name, values[i].value);
++		if (ret)
++			goto out;
++	}
++	memcpy(blob, copy, len);
++	arcadia_handoff_ready = true;
++	printf("Arcadia handoff: reserved framebuffer %lx+%lx for 1080p60 HDMI\n",
++	       base, size);
++out:
++	if (ret)
++		printf("Arcadia handoff: FDT update failed (%d); using normal cleanup\n", ret);
++	free(copy);
++	return ret;
+ }
+ 
+ int rk_vop2_probe(struct udevice *dev)
+--- a/drivers/video/rockchip/rk_vop2.h
++++ b/drivers/video/rockchip/rk_vop2.h
+@@ -7,12 +7,16 @@
+ #define __RK_VOP2_H__
+ 
+ #include <asm/arch-rockchip/vop_rk3568.h>
++#include <fdtdec.h>
+ 
+ struct rk_vop2_priv {
+ 	void *grf;
+ 	void *regs;
+ 	int vp;
+ 	int layer;
++	int output_mode;
++	struct display_timing timing;
++	bool timing_valid;
+ };
+ 
+ enum vop2_features {
+@@ -72,5 +76,8 @@
+  * Return: 0 (always OK)
+  */
+ int rk_vop2_bind(struct udevice *dev);
++int rk_vop2_arcadia_handoff(void *blob);
++bool rk_vop2_arcadia_handoff_ready(void);
++void rk_vop2_arcadia_handoff_reset(void);
+ 
+ #endif
+--- a/drivers/video/video-uclass.c
++++ b/drivers/video/video-uclass.c
+@@ -597,7 +597,9 @@
+ 	return SPLASH_START(u_boot_logo);
+ }
+ 
+-/* Only use artwork on the boot partition of the SPL-selected MMC. */
++/* Read only the exact known-size unscaled artwork. */
++bool arcadia_artwork_shown;
++
+ static int arcadia_select_boot_partition(void)
+ {
+ 	const char *path = ofnode_read_chosen_string("u-boot,spl-boot-device");
+@@ -630,6 +632,7 @@
+ 	u8 *data;
+ 	int ret;
+ 
++	arcadia_artwork_shown = false;
+ 	if (priv->xsize < 1280 || priv->ysize < 720)
+ 		return 0;
+ 	data = malloc(size + 1);
+@@ -655,6 +658,7 @@
+ 	ret = video_bmp_display(dev, map_to_sysmem(data), BMP_ALIGN_CENTER,
+ 				BMP_ALIGN_CENTER, true);
+ 	free(data);
++	arcadia_artwork_shown = !ret;
+ 	printf("Arcadia artwork: %s\n", ret ? "display failed" : "displayed");
+ 	return 0;
+ }
+--- a/include/bootm.h
++++ b/include/bootm.h
+@@ -11,6 +11,9 @@
+ 
+ struct boot_params;
+ struct cmd_tbl;
++
++void board_bootm_start(void);
++void board_bootm_cancel(void);
+ 
+ #define BOOTM_ERR_RESET		(-1)
+ #define BOOTM_ERR_OVERLAP		(-2)
+--- a/lib/efi_loader/efi_boottime.c
++++ b/lib/efi_loader/efi_boottime.c
+@@ -2236,6 +2236,8 @@
+ 			list_del(&evt->link);
+ 	}
+ 
++	/* EFI does not use the vendor Linux FDT handoff. */
++	board_bootm_cancel();
+ 	if (!efi_st_keep_devices) {
+ 		bootm_disable_interrupts();
+ 		if (IS_ENABLED(CONFIG_DM_ETH))

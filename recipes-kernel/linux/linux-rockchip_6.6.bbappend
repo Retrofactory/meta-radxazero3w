@@ -24,6 +24,7 @@ SRC_URI:append:radxa-zero3w = " \
     file://0001-arm64-dts-rockchip-Add-Radxa-Zero-3W-support.patch \
     file://0002-media-i2c-Add-Sony-IMX708-sensor-driver.patch \
     file://0003-Adds-support-for-AIC8800D80.patch \
+    file://0004-drm-rockchip-vop2-defer-gamma-while-disabled.patch \
 "
 
 # Generic base + board-specific + camera overlays

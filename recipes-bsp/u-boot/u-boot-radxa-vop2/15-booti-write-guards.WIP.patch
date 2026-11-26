@@ -1,0 +1,138 @@
+Subject: [PATCH] booti: refuse framebuffer writes before decompression and relocation
+Upstream-Status: Inappropriate [local diagnostic]
+
+booti writes to three addresses taken from environment or Image metadata
+before any of them is compared with the framebuffer reservation:
+kernel_comp_addr_r (image_decomp destination), the kernel load address (the
+copy-back of the decompressed Image) and the relocated load address. Refuse
+each write whose destination would overlap the range recorded by
+video_reserve(), using only gd_video_bottom()/gd_video_top() and wrap-safe
+arithmetic. The scaled compression bound is also refused when comp_len * 10
+would wrap, and a partially set or inverted recorded video range fails closed
+instead of being ignored.
+
+Scope of this diagnostic:
+
+- Only the three writes below are checked, and only against the recorded
+  video reservation. No other reserved memory, LMB region, load address or
+  source check is changed, and nothing is reserved or relocated differently.
+- Not covered: FIT/bootm payload loads (bootm_find_images and the bootm FIT
+  loader), raw load/acp commands, initrd and FDT placement, EFI loaders, the
+  other bootmeths, extlinux reads (patch 14 covers only that reader) and an
+  active IOMMU during handoff. This is not evidence that handoff is safe.
+- image_decomp() takes a uint unc_len, so the existing implicit narrowing of
+  decomp_len is unchanged; the decompression window is checked at full width
+  so the check is never narrower than the window passed to the decompressor.
+- A rejected decompression window returns before unmap_sysmem(), matching the
+  pre-existing early returns for a missing kernel_comp_addr_r/kernel_comp_size
+  in the same block; the boot aborts, so nothing is loaded afterwards.
+
+Compiled only with the opt-in WIP configuration; not release code.
+
+---
+--- a/cmd/booti.c
++++ b/cmd/booti.c
+@@ -17,6 +17,49 @@
+ #include <linux/sizes.h>
+ 
+ DECLARE_GLOBAL_DATA_PTR;
++
++/*
++ * Arcadia local diagnostic: would a write cover part of the framebuffer
++ * reservation recorded by video_reserve()?
++ *
++ * The decision uses only gd_video_bottom()/gd_video_top(), so it needs no
++ * driver or devicetree access and is a no-op when video reserved nothing.
++ * It protects that single range only; other reserved memory, the LMB map and
++ * the boot payload itself are unchanged.
++ *
++ * @addr:	address the write starts at
++ * @size:	number of bytes the write covers
++ * Return:	0 to allow the write, -ERANGE for an unusable video range or a
++ *		wrapping destination, -EPERM if the destination overlaps video
++ */
++static int arcadia_video_write_check(ulong addr, ulong size)
++{
++	ulong bottom = gd_video_bottom();
++	ulong top = gd_video_top();
++
++	/* No video reservation: nothing to protect, so leave the write alone. */
++	if (!bottom && !top)
++		return 0;
++
++	/* A partial or inverted range cannot be checked, so fail closed. */
++	if (!bottom || top <= bottom)
++		return -ERANGE;
++
++	/* A zero-length write covers no bytes. */
++	if (!size)
++		return 0;
++
++	/* Reject a destination end address that would wrap. */
++	if (addr + size < addr)
++		return -ERANGE;
++
++	/* Writes wholly below or wholly above the reservation are unaffected. */
++	if (addr >= top || addr + size <= bottom)
++		return 0;
++
++	return -EPERM;
++}
++
+ /*
+  * Image booting support
+  */
+@@ -63,13 +106,38 @@ static int booti_start(struct bootm_info *bmi)
+ 
+ 		debug("kernel image compression type %d size = 0x%08lx address = 0x%08lx\n",
+ 			ctype, comp_len, (ulong)dest);
++
++		/*
++		 * Arcadia: refuse a 10x output bound that would wrap, then check the
++		 * whole decompression window before image_decomp() writes to it.
++		 */
++		if (comp_len > ULONG_MAX / 10) {
++			printf("Arcadia booti guard: kernel_comp_size %lx cannot be scaled\n",
++			       comp_len);
++			return -ERANGE;
++		}
+ 		decomp_len = comp_len * 10;
++		ret = arcadia_video_write_check(dest, decomp_len);
++		if (ret) {
++			printf("Arcadia booti guard: decompress %lx size %lx, video %lx-%lx\n",
++			       (ulong)dest, decomp_len, gd_video_bottom(),
++			       gd_video_top());
++			return ret;
++		}
++
+ 		ret = image_decomp(ctype, 0, ld, IH_TYPE_KERNEL,
+ 				 (void *)dest, (void *)ld, comp_len,
+ 				 decomp_len, &dest_end);
+ 		if (ret)
+ 			return ret;
+ 		/* dest_end contains the uncompressed Image size */
++		/* Arcadia: check the copy destination before it is written. */
++		ret = arcadia_video_write_check(ld, dest_end);
++		if (ret) {
++			printf("Arcadia booti guard: copy %lx size %lx, video %lx-%lx\n",
++			       ld, dest_end, gd_video_bottom(), gd_video_top());
++			return ret;
++		}
+ 		memmove((void *) ld, (void *)dest, dest_end);
+ 	}
+ 	unmap_sysmem((void *)ld);
+@@ -80,6 +148,14 @@ static int booti_start(struct bootm_info *bmi)
+ 
+ 	/* Handle BOOTM_STATE_LOADOS */
+ 	if (relocated_addr != ld) {
++		/* Arcadia: check the relocation destination before it is written. */
++		ret = arcadia_video_write_check(relocated_addr, image_size);
++		if (ret) {
++			printf("Arcadia booti guard: relocate %lx size %lx, video %lx-%lx\n",
++			       relocated_addr, image_size, gd_video_bottom(),
++			       gd_video_top());
++			return ret;
++		}
+ 		printf("Moving Image from 0x%lx to 0x%lx, end=0x%lx\n", ld,
+ 		       relocated_addr, relocated_addr + image_size);
+ 		memmove((void *)relocated_addr, (void *)ld, image_size);

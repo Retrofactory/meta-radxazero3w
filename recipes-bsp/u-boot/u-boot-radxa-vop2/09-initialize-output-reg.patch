@@ -1,0 +1,16 @@
+Subject: [PATCH] video: rockchip: initialize RK3568 output register
+Upstream-Status: Inappropriate [local diagnostic]
+
+Initialize the value before ORing output enable and mux bits.
+
+--- a/drivers/video/rockchip/rk3568_vop.c
++++ b/drivers/video/rockchip/rk3568_vop.c
+@@ -72,7 +72,7 @@ static void rk3568_enable_output(struct udevice *dev,
+ {
+ 	struct rk_vop2_priv *priv = dev_get_priv(dev);
+ 	struct rk3568_vop_sysctrl *sysctrl = priv->regs + VOP2_SYSREG_OFFSET;
+-	u32 reg;
++	u32 reg = 0;
+ 
+ 	switch (mode) {
+ 	case VOP_MODE_EDP:
