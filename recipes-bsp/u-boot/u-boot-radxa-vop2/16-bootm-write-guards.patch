@@ -84,7 +84,6 @@ Scope:
 - A refusal prints a guard message and returns BOOTM_ERR_RESET, the same
   "reset to recover" outcome as a failed decompression.
 
-Compiled only with the opt-in guarded-handoff configuration.
 
 ---
 --- a/boot/bootm.c

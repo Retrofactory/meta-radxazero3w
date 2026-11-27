@@ -27,6 +27,30 @@ SPL/ITB pair consumed by idbloader packing during image generation."
 SRC_URI = "git://source.denx.de/u-boot/u-boot.git;protocol=https;branch=master;tag=v${PV} \
            git://github.com/radxa/rkbin.git;protocol=https;branch=develop-v${PV};name=rkbin;destsuffix=rkbin"
 
+# Boot artwork and the guarded display handoff (u-boot-radxa-vop2/README.md):
+# the RK3568 VOP2/HDMI series, Arcadia's artwork loader, the HDMI range fix,
+# the loader-logo handoff with its framebuffer write guards, and one config
+# fragment that arms the handoff from the default boot command.
+FILESEXTRAPATHS:prepend := "${THISDIR}/u-boot-radxa-vop2:"
+SRC_URI += " \
+    file://01-upstream.patch \
+    file://02-upstream.patch \
+    file://03-upstream.patch \
+    file://04-upstream.patch \
+    file://05-upstream.patch \
+    file://06-upstream.patch \
+    file://07-upstream.patch \
+    file://08-upstream.patch \
+    file://09-initialize-output-reg.patch \
+    file://arcadia-boot-artwork.patch \
+    file://10-dw-hdmi-cea-limited-range.patch \
+    file://radxa-guarded-logo-handoff.patch \
+    file://14-guard-extlinux-reads.patch \
+    file://15-booti-write-guards.patch \
+    file://16-bootm-write-guards.patch \
+    file://vop2-display.cfg \
+"
+
 # Multiple SCMs in SRC_URI require SRCREV_FORMAT to disambiguate them.
 # u-boot itself is the first SCM (=>SRCREV); the second is named 'rkbin'.
 SRCREV_FORMAT = "_rkbin"

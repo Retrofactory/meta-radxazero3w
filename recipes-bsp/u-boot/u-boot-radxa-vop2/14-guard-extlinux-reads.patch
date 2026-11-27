@@ -8,7 +8,6 @@ using only gd_video_bottom()/gd_video_top() and wrap-safe arithmetic. Bound
 the actual extlinux read to the checked nonzero file size, and reject short
 reads; fs_read() with length zero otherwise means read the whole file even if
 its size changes between the check and read. Other bootmeths are unchanged.
-Compiled only with the opt-in guarded-handoff configuration.
 
 --- a/boot/bootmeth-uclass.c
 +++ b/boot/bootmeth-uclass.c

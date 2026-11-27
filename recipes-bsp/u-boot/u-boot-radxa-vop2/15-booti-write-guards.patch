@@ -27,7 +27,6 @@ Scope:
   pre-existing early returns for a missing kernel_comp_addr_r/kernel_comp_size
   in the same block; the boot aborts, so nothing is loaded afterwards.
 
-Compiled only with the opt-in guarded-handoff configuration.
 
 ---
 --- a/cmd/booti.c

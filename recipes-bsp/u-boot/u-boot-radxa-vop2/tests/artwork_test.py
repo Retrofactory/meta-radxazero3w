@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-side structural checks for the artwork patch and the guarded profile.
+"""Host-side structural checks for the artwork patch and the U-Boot recipe's patch stack.
 
 These checks do not exercise U-Boot, a filesystem, display hardware or DMA.
 """
@@ -14,14 +14,14 @@ class ArtworkTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.patch = (ROOT / "arcadia-boot-artwork.patch").read_text()
-        cls.conf = (ROOT / "guarded-handoff.conf").read_text()
+        cls.conf = (ROOT.parent / "u-boot-radxa_2026.01.bb").read_text()
 
     def test_artwork_patch_is_independent_of_handoff(self):
         self.assertNotIn("handoff_ready", self.patch)
         self.assertNotIn("arcadia_handoff", self.patch)
-        self.assertIn("CONFIG_VIDEO_REMOVE=y", (ROOT / "vop2-video.cfg").read_text())
+        self.assertIn("CONFIG_VIDEO_REMOVE=y", (ROOT / "vop2-display.cfg").read_text())
 
-    def test_profile_patch_order_and_scope(self):
+    def test_recipe_patch_order_and_scope(self):
         patches = re.findall(r'file://(\S+\.patch)', self.conf)
         self.assertEqual(patches[-4:], [
             'radxa-guarded-logo-handoff.patch', '14-guard-extlinux-reads.patch',
