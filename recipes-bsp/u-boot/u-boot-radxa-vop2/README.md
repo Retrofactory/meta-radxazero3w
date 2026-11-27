@@ -50,5 +50,6 @@ of the [submitted VOP2/HDMI
 series](https://lore.kernel.org/u-boot/cover.1784424101.git.daniel@makrotopia.org/). These are
 `01-08-upstream.patch`: unmerged mailing-list changes by other authors (each header carries its
 `Upstream-Status` link), not our work and not something we submit. Everything from `09` on is
-local: the output-register fix, the artwork loader and the video config fragment. The guarded profiles add
+local: the output-register fix, the artwork loader, the HDMI limited-range/AVI fix (`10`, so Linux
+inherits the range it would program itself) and the video config fragment. The guarded profiles add
 the board handoff, `CONFIG_OF_BOARD_SETUP=y` and the three framebuffer write guards.

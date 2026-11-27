@@ -1,0 +1,170 @@
+Subject: [PATCH] video: dw_hdmi: send limited-range RGB and an AVI infoframe for CEA 1080p60
+Upstream-Status: Inappropriate [board-specific]
+
+The Rockchip vendor kernel keeps the bootloader's DW-HDMI programming when it
+finds the link already running, and only reprograms it on a colour change or a
+full disable. U-Boot sent full-range RGB with no AVI quantization, which a sink
+treats as limited range for a CEA mode, so the picture was too bright until the
+first full Linux modeset. For 1920x1080p60 (VIC 16) with RGB output, compress
+to limited range in the CSC and send the AVI fields Linux uses (RGB, limited
+range, 16:9, underscan, VIC 16). The RK3568 glue leaves the bus format unset,
+which hdmi_video_csc() otherwise skips; treat it as RGB888 in this case. Other
+modes are unchanged.
+
+diff --git a/drivers/video/dw_hdmi.c b/drivers/video/dw_hdmi.c
+index 1bf65fb..b71296a 100644
+--- a/drivers/video/dw_hdmi.c
++++ b/drivers/video/dw_hdmi.c
+@@ -75,6 +75,12 @@ static const u16 csc_coeff_rgb_out_eitu601[3][4] = {
+ 	{ 0x2000, 0x0000, 0x38b4, 0x7e3b }
+ };
+ 
++static const u16 csc_coeff_rgb_full_to_rgb_limited[3][4] = {
++	{ 0x1b7c, 0x0000, 0x0000, 0x0020 },
++	{ 0x0000, 0x1b7c, 0x0000, 0x0020 },
++	{ 0x0000, 0x0000, 0x1b7c, 0x0020 }
++};
++
+ static void dw_hdmi_write(struct dw_hdmi *hdmi, u8 val, int offset)
+ {
+ 	switch (hdmi->reg_io_width) {
+@@ -625,13 +631,40 @@ static int is_color_space_conversion(struct dw_hdmi *hdmi)
+ 	       hdmi->hdmi_data.enc_out_bus_format;
+ }
+ 
++/* The CSC also runs when full-range RGB is compressed to limited range. */
++static bool is_csc_needed(struct dw_hdmi *hdmi)
++{
++	return is_color_space_conversion(hdmi) ||
++	       hdmi->hdmi_data.rgb_limited_range;
++}
++
++/*
++ * CEA-861 VIC for the timings Linux's DRM also treats as CEA modes; 0 for
++ * anything else. Only 1920x1080p60 is listed: other modes keep the previous
++ * behaviour (full-range RGB, no AVI quantization).
++ */
++static u8 hdmi_cea_vic(const struct display_timing *t)
++{
++	if (t->pixelclock.typ == 148500000 && t->hactive.typ == 1920 &&
++	    t->vactive.typ == 1080 && t->hfront_porch.typ == 88 &&
++	    t->hsync_len.typ == 44 && t->hback_porch.typ == 148 &&
++	    t->vfront_porch.typ == 4 && t->vsync_len.typ == 5 &&
++	    t->vback_porch.typ == 36 &&
++	    !(t->flags & DISPLAY_FLAGS_INTERLACED))
++		return 16;
++	return 0;
++}
++
+ static void dw_hdmi_update_csc_coeffs(struct dw_hdmi *hdmi)
+ {
+ 	const u16 (*csc_coeff)[3][4] = &csc_coeff_default;
+ 	unsigned int i;
+ 	u32 csc_scale = 1;
+ 
+-	if (is_color_space_conversion(hdmi)) {
++	if (hdmi->hdmi_data.rgb_limited_range &&
++	    !is_color_space_conversion(hdmi)) {
++		csc_coeff = &csc_coeff_rgb_full_to_rgb_limited;
++	} else if (is_color_space_conversion(hdmi)) {
+ 		if (hdmi_bus_fmt_is_rgb(hdmi->hdmi_data.enc_out_bus_format)) {
+ 			csc_coeff = &csc_coeff_rgb_out_eitu601;
+ 		} else if (hdmi_bus_fmt_is_rgb(
+@@ -661,6 +694,7 @@ static void dw_hdmi_update_csc_coeffs(struct dw_hdmi *hdmi)
+ static void hdmi_video_csc(struct dw_hdmi *hdmi)
+ {
+ 	int color_depth = 0;
++	int depth;
+ 	int interpolation = HDMI_CSC_CFG_INTMODE_DISABLE;
+ 	int decimation = 0;
+ 
+@@ -670,7 +704,12 @@ static void hdmi_video_csc(struct dw_hdmi *hdmi)
+ 	else if (is_color_space_decimation(hdmi))
+ 		decimation = HDMI_CSC_CFG_DECMODE_CHROMA_INT_FORMULA3;
+ 
+-	switch (hdmi_bus_fmt_color_depth(hdmi->hdmi_data.enc_out_bus_format)) {
++	depth = hdmi_bus_fmt_color_depth(hdmi->hdmi_data.enc_out_bus_format);
++	/* An unset bus format is RGB888 here (dw_hdmi_enable() checked it). */
++	if (!depth && hdmi->hdmi_data.rgb_limited_range)
++		depth = 8;
++
++	switch (depth) {
+ 	case 8:
+ 		color_depth = HDMI_CSC_SCALE_CSC_COLORDE_PTH_24BPP;
+ 		break;
+@@ -724,13 +763,13 @@ static void hdmi_enable_video_path(struct dw_hdmi *hdmi, bool audio)
+ 	hdmi_write(hdmi, clkdis, HDMI_MC_CLKDIS);
+ 
+ 	/* Enable csc path */
+-	if (is_color_space_conversion(hdmi)) {
++	if (is_csc_needed(hdmi)) {
+ 		clkdis &= ~HDMI_MC_CLKDIS_CSCCLK_DISABLE;
+ 		hdmi_write(hdmi, clkdis, HDMI_MC_CLKDIS);
+ 	}
+ 
+ 	/* Enable color space conversion if needed */
+-	if (is_color_space_conversion(hdmi))
++	if (is_csc_needed(hdmi))
+ 		hdmi_write(hdmi, HDMI_MC_FLOWCTRL_FEED_THROUGH_OFF_CSC_IN_PATH,
+ 			   HDMI_MC_FLOWCTRL);
+ 	else
+@@ -743,6 +782,25 @@ static void hdmi_enable_video_path(struct dw_hdmi *hdmi, bool audio)
+ 	}
+ }
+ 
++/*
++ * Send the AVI infoframe fields Linux's dw-hdmi programs for a CEA mode with
++ * RGB output: limited quantization range, 16:9, underscan. Matching them lets
++ * a kernel that keeps the bootloader's HDMI state show the same picture.
++ */
++static void hdmi_config_avi(struct dw_hdmi *hdmi, u8 vic)
++{
++	hdmi_write(hdmi, HDMI_FC_AVICONF0_PIX_FMT_RGB |
++		   HDMI_FC_AVICONF0_ACTIVE_FMT_INFO_PRESENT |
++		   HDMI_FC_AVICONF0_SCAN_INFO_UNDERSCAN, HDMI_FC_AVICONF0);
++	hdmi_write(hdmi, HDMI_FC_AVICONF1_CODED_ASPECT_RATIO_16_9 |
++		   HDMI_FC_AVICONF1_ACTIVE_ASPECT_RATIO_USE_CODED,
++		   HDMI_FC_AVICONF1);
++	hdmi_write(hdmi, HDMI_FC_AVICONF2_RGB_QUANT_LIMITED_RANGE,
++		   HDMI_FC_AVICONF2);
++	hdmi_write(hdmi, 0, HDMI_FC_AVICONF3);
++	hdmi_write(hdmi, vic, HDMI_FC_AVIVID);
++}
++
+ /* workaround to clear the overflow condition */
+ static void hdmi_clear_overflow(struct dw_hdmi *hdmi)
+ {
+@@ -997,12 +1055,21 @@ int dw_hdmi_read_edid(struct dw_hdmi *hdmi, u8 *buf, int buf_size)
+ int dw_hdmi_enable(struct dw_hdmi *hdmi, const struct display_timing *edid)
+ {
+ 	int ret;
++	u8 vic;
+ 
+ 	debug("%s, mode info : clock %d hdis %d vdis %d\n",
+ 	      edid->hdmi_monitor ? "hdmi" : "dvi",
+ 	      edid->pixelclock.typ, edid->hactive.typ, edid->vactive.typ);
+ 
++	vic = edid->hdmi_monitor ? hdmi_cea_vic(edid) : 0;
++	hdmi->hdmi_data.rgb_limited_range = vic &&
++		!is_color_space_conversion(hdmi) &&
++		(!hdmi->hdmi_data.enc_out_bus_format ||
++		 hdmi_bus_fmt_is_rgb(hdmi->hdmi_data.enc_out_bus_format));
++
+ 	hdmi_av_composer(hdmi, edid);
++	if (hdmi->hdmi_data.rgb_limited_range)
++		hdmi_config_avi(hdmi, vic);
+ 
+ 	ret = hdmi->ops->phy_set(hdmi, edid->pixelclock.typ);
+ 	if (ret)
+diff --git a/include/dw_hdmi.h b/include/dw_hdmi.h
+index fab5aaf..fc104b7 100644
+--- a/include/dw_hdmi.h
++++ b/include/dw_hdmi.h
+@@ -528,6 +528,7 @@ struct hdmi_data_info {
+ 	unsigned int enc_out_encoding;
+ 	unsigned int pix_repet_factor;
+ 	unsigned int hdcp_enable;
++	bool rgb_limited_range;
+ 	struct hdmi_vmode video_mode;
+ };
+ 
